@@ -1,12 +1,12 @@
 #property strict
-#property version "3.5"
-#property description "AI-Assisted XAUUSD H1 Adaptive Regime EA v3.5"
+#property version "5.1"
+#property description "AI-Assisted XAUUSD H1 Adaptive Regime EA v5.1 ADX Rising Pullback Risk 0.2915"
 #include <Trade/Trade.mqh>
 CTrade trade;
 
 input string InpSymbol="XAUUSD";
 input ENUM_TIMEFRAMES InpTimeframe=PERIOD_H1;
-input double RiskPercent=0.10;
+input double RiskPercent=0.2915;
 input double DailyLossLimitPercent=6.0;
 input double MaxEquityDrawdownPercent=34.0;
 input int MaxSpreadPoints=80;
@@ -18,7 +18,7 @@ input int ATRPeriod=14;
 input int RSIPeriod=14;
 input int BBPeriod=20;
 input double BBDeviation=2.0;
-input double TrendADXMin=20.0;
+input double TrendADXMin=25.0;
 input double RangeADXMax=19.0;
 input double TrendSL_ATR=1.3;
 input double TrendTP_ATR=2.3;
@@ -33,15 +33,23 @@ input int CooldownBars=2;
 input bool UseBreakEven=true;
 input double BreakEvenAtR=1.25;
 input double BreakEvenLockR=0.05;
+input bool SellPullbackOnly=true;
+input double SellDIRatio=1.25;
+input double SellRSIMin=38.0;
+input double SellRSIMax=50.0;
+input bool EnableTrendSell=false;
 
 int hFast=INVALID_HANDLE,hSlow=INVALID_HANDLE,hADX=INVALID_HANDLE,hATR=INVALID_HANDLE;
-int hEntryEMA=INVALID_HANDLE;
+int hEntryEMA=INVALID_HANDLE,hFastD1=INVALID_HANDLE,hSlowD1=INVALID_HANDLE;
 int hRSI=INVALID_HANDLE,hBB=INVALID_HANDLE;
 datetime lastBar=0;
 double peakEquity=0.0,dayStartEquity=0.0;
 int lossCooldown=0;
 int riskDay=0;
 long barsEvaluated=0, regimeTrendUp=0, regimeTrendDown=0, regimeRange=0, regimeNone=0, signalBuy=0, signalSell=0, ordersOpened=0, riskBlocked=0, spreadBlocked=0, dailyBlocked=0, ddBlocked=0;
+long trendBuyTrades=0,trendSellTrades=0,rangeBuyTrades=0,rangeSellTrades=0;
+double trendBuyProfit=0.0,trendSellProfit=0.0,rangeBuyProfit=0.0,rangeSellProfit=0.0;
+string currentTradeCategory="";
 
 enum Regime { NONE, TREND_UP, TREND_DOWN, RANGE };
 
@@ -175,10 +183,12 @@ double LotSize(double entry,double sl)
 bool TrendSignal(Regime regime,int shift,bool &buy,bool &sell)
 {
    buy=false;sell=false;
-   double fast,rsi,adx,entryEMA,atr,pdi,mdi;
+   double fast,rsi,adx,adxPrev,entryEMA,atr,pdi,mdi;
    if(!Buf(hFast,0,shift,fast)||!Buf(hRSI,0,shift,rsi)||!Buf(hADX,0,shift,adx)||
       !Buf(hADX,1,shift,pdi)||!Buf(hADX,2,shift,mdi)||
-      !Buf(hEntryEMA,0,shift,entryEMA)||!Buf(hATR,0,shift,atr)) return false;
+      !Buf(hEntryEMA,0,shift,entryEMA)||!Buf(hATR,0,shift,atr)||!Buf(hADX,0,shift+1,adxPrev)) return false;
+   double d1Fast=0.0,d1Slow=0.0;
+   if(hFastD1==INVALID_HANDLE||hSlowD1==INVALID_HANDLE||!Buf(hFastD1,0,1,d1Fast)||!Buf(hSlowD1,0,1,d1Slow)) return false;
    double close=iClose(InpSymbol,InpTimeframe,shift);
    double high1=iHigh(InpSymbol,InpTimeframe,shift);
    double low1=iLow(InpSymbol,InpTimeframe,shift);
@@ -198,10 +208,13 @@ bool TrendSignal(Regime regime,int shift,bool &buy,bool &sell)
    bool breakoutBuy=(close>lookbackHigh);
    bool breakoutSell=(close<lookbackLow);
 
-   if(regime==TREND_UP && adx>=TrendADXMin && pdi>mdi && fast>0 && close>fast &&
-      rsi>=45 && rsi<=68 && (pullbackBuy||breakoutBuy)) buy=true;
-   if(regime==TREND_DOWN && adx>=TrendADXMin && mdi>pdi && fast>0 && close<fast &&
-      rsi>=32 && rsi<=55 && (pullbackSell||breakoutSell)) sell=true;
+   if(regime==TREND_UP && adx>=TrendADXMin && pdi>mdi && fast>0 && close>fast && d1Fast>d1Slow &&
+      rsi>=45 && rsi<=68 && adx>=adxPrev && pullbackBuy) buy=true;
+   bool sellStructure=(close<entryEMA && entryEMA<fast);
+   bool sellDI=(mdi >= pdi*SellDIRatio);
+   bool sellTrigger=SellPullbackOnly ? pullbackSell : (pullbackSell||breakoutSell);
+   if(EnableTrendSell && regime==TREND_DOWN && adx>=TrendADXMin && sellStructure && sellDI &&
+      rsi>=SellRSIMin && rsi<=SellRSIMax && sellTrigger) sell=true;
    return true;
 }
 
@@ -259,7 +272,15 @@ void OpenTrade(bool buy,bool trend)
    trade.SetDeviationInPoints(20);
    bool ok=buy?trade.Buy(lot,InpSymbol,0,sl,tp,trend?"Adaptive Trend BUY":"Adaptive Range BUY")
              :trade.Sell(lot,InpSymbol,0,sl,tp,trend?"Adaptive Trend SELL":"Adaptive Range SELL");
-   if(ok) ordersOpened++; else Print("Order failed: ",trade.ResultRetcodeDescription());
+   if(ok)
+   {
+      ordersOpened++;
+      if(trend && buy) { trendBuyTrades++; currentTradeCategory="TREND_BUY"; }
+      else if(trend && !buy) { trendSellTrades++; currentTradeCategory="TREND_SELL"; }
+      else if(!trend && buy) { rangeBuyTrades++; currentTradeCategory="RANGE_BUY"; }
+      else { rangeSellTrades++; currentTradeCategory="RANGE_SELL"; }
+   }
+   else Print("Order failed: ",trade.ResultRetcodeDescription());
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
@@ -272,10 +293,19 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    if(entry==DEAL_ENTRY_OUT)
    {
       double p=HistoryDealGetDouble(trans.deal,DEAL_PROFIT)+HistoryDealGetDouble(trans.deal,DEAL_SWAP)+HistoryDealGetDouble(trans.deal,DEAL_COMMISSION);
+      if(currentTradeCategory=="TREND_BUY") trendBuyProfit+=p;
+      else if(currentTradeCategory=="TREND_SELL") trendSellProfit+=p;
+      else if(currentTradeCategory=="RANGE_BUY") rangeBuyProfit+=p;
+      else if(currentTradeCategory=="RANGE_SELL") rangeSellProfit+=p;
       if(p<0) lossCooldown=CooldownBars;
+      currentTradeCategory="";
    }
 }void ManageOpenPosition()
 {
+   static datetime lastManageBar=0;
+   datetime manageBar=iTime(InpSymbol,InpTimeframe,0);
+   if(manageBar==0 || manageBar==lastManageBar) return;
+   lastManageBar=manageBar;
    if(!UseBreakEven || !PositionSelect(InpSymbol)) return;
    if((int)PositionGetInteger(POSITION_MAGIC)!=MagicNumber) return;
    double open=PositionGetDouble(POSITION_PRICE_OPEN);
@@ -293,7 +323,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    int digits=(int)SymbolInfoInteger(InpSymbol,SYMBOL_DIGITS);
    newSL=NormalizeDouble(newSL,digits);
    bool improve=(type==POSITION_TYPE_BUY)?(newSL>sl):(newSL<sl || sl==0);
-   if(improve) trade.PositionModify(InpSymbol,newSL,tp);
+   if(improve)
+   {
+      double point=SymbolInfoDouble(InpSymbol,SYMBOL_POINT);
+      long stopsLevel=SymbolInfoInteger(InpSymbol,SYMBOL_TRADE_STOPS_LEVEL);
+      double minDistance=stopsLevel*point;
+      bool validSide=(type==POSITION_TYPE_BUY)?(newSL < tick.bid-minDistance):(newSL > tick.ask+minDistance);
+      if(validSide) trade.PositionModify(InpSymbol,newSL,tp);
+   }
 }
 
 void CloseInvalidated()
@@ -320,7 +357,7 @@ void Evaluate()
    else if(r==RANGE) regimeRange++;
    else regimeNone++;
    if((barsEvaluated%1000)==0)
-      PrintFormat("DIAG v3.5 bars=%I64d up=%I64d down=%I64d range=%I64d none=%I64d buy=%I64d sell=%I64d orders=%I64d risk=%I64d daily=%I64d dd=%I64d spread=%I64d",barsEvaluated,regimeTrendUp,regimeTrendDown,regimeRange,regimeNone,signalBuy,signalSell,ordersOpened,riskBlocked,dailyBlocked,ddBlocked,spreadBlocked);
+      PrintFormat("DIAG v3.7 bars=%I64d up=%I64d down=%I64d range=%I64d none=%I64d buy=%I64d sell=%I64d orders=%I64d risk=%I64d daily=%I64d dd=%I64d spread=%I64d",barsEvaluated,regimeTrendUp,regimeTrendDown,regimeRange,regimeNone,signalBuy,signalSell,ordersOpened,riskBlocked,dailyBlocked,ddBlocked,spreadBlocked);
    bool buy=false,sell=false;
    if(r==TREND_UP||r==TREND_DOWN)
    {
@@ -341,30 +378,35 @@ int OnInit()
    if(!SymbolSelect(InpSymbol,true)) return INIT_FAILED;
    hFast=iMA(InpSymbol,InpTimeframe,EMAFastPeriod,0,MODE_EMA,PRICE_CLOSE);
    hEntryEMA=iMA(InpSymbol,InpTimeframe,20,0,MODE_EMA,PRICE_CLOSE);
+   hFastD1=iMA(InpSymbol,PERIOD_D1,EMAFastPeriod,0,MODE_EMA,PRICE_CLOSE);
+   hSlowD1=iMA(InpSymbol,PERIOD_D1,EMASlowPeriod,0,MODE_EMA,PRICE_CLOSE);
    hSlow=iMA(InpSymbol,InpTimeframe,EMASlowPeriod,0,MODE_EMA,PRICE_CLOSE);
    hADX=iADX(InpSymbol,InpTimeframe,ADXPeriod);
    hATR=iATR(InpSymbol,InpTimeframe,ATRPeriod);
    hRSI=iRSI(InpSymbol,InpTimeframe,RSIPeriod,PRICE_CLOSE);
    hBB=iBands(InpSymbol,InpTimeframe,BBPeriod,0,BBDeviation,PRICE_CLOSE);
-   if(hFast==INVALID_HANDLE||hEntryEMA==INVALID_HANDLE||hSlow==INVALID_HANDLE||hADX==INVALID_HANDLE||
+   if(hFast==INVALID_HANDLE||hEntryEMA==INVALID_HANDLE||hFastD1==INVALID_HANDLE||hSlowD1==INVALID_HANDLE||hSlow==INVALID_HANDLE||hADX==INVALID_HANDLE||
       hATR==INVALID_HANDLE||hRSI==INVALID_HANDLE||hBB==INVALID_HANDLE)
       return INIT_FAILED;
    trade.SetExpertMagicNumber(MagicNumber);
    UpdateRisk();
-   Print("XAUUSD Regime EA v3.4 initialized.");
+   Print("XAUUSD Regime EA v5.1 initialized.");
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
    if(hEntryEMA!=INVALID_HANDLE)IndicatorRelease(hEntryEMA);
+   if(hFastD1!=INVALID_HANDLE)IndicatorRelease(hFastD1);
+   if(hSlowD1!=INVALID_HANDLE)IndicatorRelease(hSlowD1);
    if(hFast!=INVALID_HANDLE)IndicatorRelease(hFast);
    if(hSlow!=INVALID_HANDLE)IndicatorRelease(hSlow);
    if(hADX!=INVALID_HANDLE)IndicatorRelease(hADX);
    if(hATR!=INVALID_HANDLE)IndicatorRelease(hATR);
    if(hRSI!=INVALID_HANDLE)IndicatorRelease(hRSI);
    if(hBB!=INVALID_HANDLE)IndicatorRelease(hBB);
-   PrintFormat("STATS v3.4 bars=%I64d up=%I64d down=%I64d range=%I64d none=%I64d buy=%I64d sell=%I64d orders=%I64d riskBlocked=%I64d daily=%I64d dd=%I64d spread=%I64d",barsEvaluated,regimeTrendUp,regimeTrendDown,regimeRange,regimeNone,signalBuy,signalSell,ordersOpened,riskBlocked,dailyBlocked,ddBlocked,spreadBlocked);
+   PrintFormat("STATS v5.1 bars=%I64d up=%I64d down=%I64d range=%I64d none=%I64d buy=%I64d sell=%I64d orders=%I64d riskBlocked=%I64d daily=%I64d dd=%I64d spread=%I64d",barsEvaluated,regimeTrendUp,regimeTrendDown,regimeRange,regimeNone,signalBuy,signalSell,ordersOpened,riskBlocked,dailyBlocked,ddBlocked,spreadBlocked);
+   PrintFormat("TRADE_BREAKDOWN v5.1 TB=%I64d TBProfit=%.2f TS=%I64d TSProfit=%.2f RB=%I64d RBProfit=%.2f RS=%I64d RSProfit=%.2f",trendBuyTrades,trendBuyProfit,trendSellTrades,trendSellProfit,rangeBuyTrades,rangeBuyProfit,rangeSellTrades,rangeSellProfit);
 }void OnTick()
 {
    UpdateRisk();
