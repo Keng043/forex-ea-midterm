@@ -53,3 +53,17 @@ It satisfies the explicit assignment thresholds in the verified full backtest wh
 
 ## Important Limitation
 MetaTrader reports 48% history quality / real ticks for this test. The result should therefore be presented as the verified MT5 Strategy Tester result, not as a guarantee of live performance.
+
+## Experimental Follow-up (Not Selected)
+After v5.1, several controlled experiments were tested against the same XAUUSD H1 full-period setup.
+
+| Version | Experiment | Net Profit | Decision |
+|---|---|---:|---|
+| v6.2 | M30 soft confirmation | +$1,254.91 | Rejected |
+| v6.3 | ATR trailing exit | +$1,185.88 | Rejected |
+| v6.4 | M30 score confidence | +$1,662.38 | Rejected for robustness |
+| v6.5 | M30 structure trailing | +$922.92 | Rejected |
+
+v6.4 produced slightly higher full-period profit than v5.1, but its later robustness split was weaker (-$413.18 versus approximately -$34.41 for v5.1), so v5.1 remains the selected baseline.
+
+These experiments are retained as development evidence only; they do not replace the final candidate.
